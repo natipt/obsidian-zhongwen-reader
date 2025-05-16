@@ -28,6 +28,72 @@ const DEFAULT_SETTINGS: ZhongwenReaderPluginSettings = {
 	saveSentences: false
 }
 
+// derived from https://gist.github.com/ttempe/4010474
+const pinyinToBopomofoMasterList: ReadonlyArray<[string, string]> = (() => {
+    const initialReplacements: Array<[string, string]> = [
+        ["yu", "u:"], ["ü", "u:"], ["v", "u:"],
+        ["you", "ㄧㄡ"], ["yi", "i"], ["y", "i"],
+        ["wong", "ㄨㄥ"], ["wu", "u"], ["w", "u"]
+    ];
+
+    const mainTable: Array<[string, string]> = [
+        // Special cases
+        ["ju", "ㄐㄩ"], ["qu", "ㄑㄩ"], ["xu", "ㄒㄩ"],
+        ["zhi", "ㄓ"], ["chi", "ㄔ"], ["shi", "ㄕ"], ["ri", "ㄖ"],
+        ["zi", "ㄗ"], ["ci", "ㄘ"], ["si", "ㄙ"],
+        ["r5", "ㄦ"],
+
+        // Initials
+        ["b", "ㄅ"], ["p", "ㄆ"], ["m", "ㄇ"], ["f", "ㄈ"],
+        ["d", "ㄉ"], ["t", "ㄊ"], ["n", "ㄋ"], ["l", "ㄌ"],
+        ["g", "ㄍ"], ["k", "ㄎ"], ["h", "ㄏ"],
+        ["j", "ㄐ"], ["q", "ㄑ"], ["x", "ㄒ"],
+        ["zh", "ㄓ"], ["ch", "ㄔ"], ["sh", "ㄕ"], ["r", "ㄖ"],
+        ["z", "ㄗ"], ["c", "ㄘ"], ["s", "ㄙ"],
+
+        // Finals
+        ["a", "ㄚ"], ["o", "ㄛ"], ["e", "ㄜ"], ["ê", "ㄝ"],
+        ["i", "ㄧ"], ["u", "ㄨ"], ["u:", "ㄩ"], // u: is for ü
+
+        ["ai", "ㄞ"], ["ei", "ㄟ"], ["ao", "ㄠ"], ["ou", "ㄡ"],
+        ["ia", "ㄧㄚ"], ["iao", "ㄧㄠ"], ["ie", "ㄧㄝ"], ["iu", "ㄧㄡ"],
+        ["ua", "ㄨㄚ"], ["uai", "ㄨㄞ"], ["ue", "ㄩㄝ"], ["u:e", "ㄩㄝ"],
+        ["ui", "ㄨㄟ"], ["uo", "ㄨㄛ"],
+
+        ["an", "ㄢ"], ["en", "ㄣ"], ["in", "ㄧㄣ"], ["un", "ㄨㄣ"], ["u:n", "ㄩㄣ"],
+        ["ang", "ㄤ"], ["eng", "ㄥ"], ["ing", "ㄧㄥ"], ["ong", "ㄨㄥ"],
+        ["ian", "ㄧㄢ"], ["iang", "ㄧㄤ"], ["iong", "ㄩㄥ"],
+        ["uan", "ㄨㄢ"], ["uang", "ㄨㄤ"],
+
+        ["er", "ㄦ"],
+
+        // Tones
+        ["1", ""], ["2", "ˊ"], ["3", "ˇ"], ["4", "ˋ"], ["5", "˙"]
+    ];
+
+    const combined = [...initialReplacements, ...mainTable];
+    combined.sort((a, b) => b[0].length - a[0].length);
+
+    const uniqueMap = new Map<string, string>();
+    for (const [key, value] of combined) {
+        if (!uniqueMap.has(key)) {
+            uniqueMap.set(key, value);
+        }
+    }
+    return Array.from(uniqueMap.entries());
+})();
+
+function convertSinglePinyinSyllableToBopomofo(pinyinSyllable: string): string {
+    if (!pinyinSyllable) return "";
+    let result = pinyinSyllable.toLowerCase();
+
+    for (const [pinyinPattern, bopomofoReplacement] of pinyinToBopomofoMasterList) {
+        const patternRegex = new RegExp(pinyinPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+        result = result.replace(patternRegex, bopomofoReplacement);
+    }
+    return result;
+}
+
 export default class ZhongwenReaderPlugin extends Plugin {
 	settings: ZhongwenReaderPluginSettings;
 	private cedictMap: Map<string, CedictEntry[]> = new Map();
@@ -531,9 +597,10 @@ export default class ZhongwenReaderPlugin extends Plugin {
 		this.activeWord = word;
 		this.activeEntries = uniqueEntries;
 
-		const text = uniqueEntries.map(entry => 
-			`${entry.simplified} ${entry.simplified !== entry.traditional? entry.traditional: ""} (${this.processPinyin(entry.pinyin)})\n${entry.definitions.join('; ')}`
-		).join('\n\n');
+		const text = uniqueEntries.map(entry => {
+			const pinyinInfo = this.processPinyin(entry.pinyin);
+			return `${entry.simplified} ${entry.simplified !== entry.traditional ? entry.traditional : ""} (${pinyinInfo.accentedPinyin} / ${pinyinInfo.bopomofo})\n${entry.definitions.join('; ')}`;
+		}).join('\n\n');
 
 		this.tooltipEl.innerText = text;
 		if (!this.hoverBoxEl) return; // Feel like I dont need this? 
@@ -544,7 +611,7 @@ export default class ZhongwenReaderPlugin extends Plugin {
 		this.tooltipEl.style.display = "block";
 	}
 
-	public processPinyin(pinyin: string): string {
+	public processPinyin(pinyin: string): { accentedPinyin: string; bopomofo: string } {
 		const toneMap: Record<string, string[]> = {
 			"a": ["ā", "á", "ǎ", "à", "a"],
 			"e": ["ē", "é", "ě", "è", "e"],
@@ -553,33 +620,58 @@ export default class ZhongwenReaderPlugin extends Plugin {
 			"u": ["ū", "ú", "ǔ", "ù", "u"],
 			"ü": ["ǖ", "ǘ", "ǚ", "ǜ", "ü"]
 		};
-	
 		const vowels = ["a", "o", "e", "i", "u", "ü"];
-	
-		// Process each syllable (split on space)
-		return pinyin.split(" ").map(syllable => {
-			const tone = parseInt(syllable[syllable.length - 1]);
-			if (tone < 1 || tone > 5) return syllable; // skip if no valid tone number
-	
-			let core = syllable.slice(0, -1); // remove tone number
-			let vowelToReplace = "";
-	
-			// find correct vowel to replace (priority order)
-			for (const v of vowels) {
-				if (core.includes(v)) {
-					vowelToReplace = v;
-					break;
+
+		const syllables = pinyin.split(" ");
+		const accentedPinyinSyllables: string[] = [];
+		const bopomofoResultSyllables: string[] = [];
+
+		for (const pinyinSyllableWithTone of syllables) {
+			if (!pinyinSyllableWithTone) {
+				accentedPinyinSyllables.push("");
+				bopomofoResultSyllables.push("");
+				continue;
+			}
+
+			bopomofoResultSyllables.push(convertSinglePinyinSyllableToBopomofo(pinyinSyllableWithTone));
+
+			let toneNumber = 0;
+			const lastChar = pinyinSyllableWithTone[pinyinSyllableWithTone.length - 1];
+			if (lastChar >= '1' && lastChar <= '5') {
+				toneNumber = parseInt(lastChar);
+			}
+
+			let corePinyin = toneNumber ? pinyinSyllableWithTone.slice(0, -1) : pinyinSyllableWithTone;
+			
+			let corePinyinForAccenting = corePinyin.replace(/u:/g, "ü");
+			let syllableToReturnForAccent = corePinyinForAccenting;
+
+			if (toneNumber >= 1 && toneNumber <= 5) {
+				let vowelToReplaceOriginalLogic = "";
+				for (const v of vowels) {
+					if (corePinyinForAccenting.includes(v)) {
+						vowelToReplaceOriginalLogic = v;
+						break;
+					}
+				}
+
+				if (vowelToReplaceOriginalLogic && toneMap[vowelToReplaceOriginalLogic]) {
+					const accentedVowel = toneMap[vowelToReplaceOriginalLogic][toneNumber - 1];
+					try {
+						const regex = new RegExp(vowelToReplaceOriginalLogic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + "(?!.*" + vowelToReplaceOriginalLogic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ")", "g");
+						syllableToReturnForAccent = corePinyinForAccenting.replace(regex, accentedVowel);
+					} catch (e) {
+						console.error("Regex error in processPinyin", e);
+					}
 				}
 			}
-	
-			if (!vowelToReplace) return syllable; // fallback: no vowel to modify
-	
-			const accented = toneMap[vowelToReplace][tone - 1];
-			const regex = new RegExp(vowelToReplace + "(?!.*" + vowelToReplace + ")", "g"); // replace LAST occurrence
-	
-			core = core.replace(regex, accented);
-			return core;
-		}).join(" ");
+			accentedPinyinSyllables.push(syllableToReturnForAccent);
+		}
+
+		return {
+			accentedPinyin: accentedPinyinSyllables.join(" "),
+			bopomofo: bopomofoResultSyllables.join(" ")
+		};
 	}
 	
 	private hideTooltip() {
@@ -882,9 +974,13 @@ class VocabSidebarView extends ItemView {
 				cls: 'vocab-word'
 			});
 	
-			// Pinyin
+			// Pinyin and Bopomofo
+			const pinyinInfo = this.plugin.processPinyin?.(entry.pinyin ?? "");
+			const pinyinDisplay = pinyinInfo
+				? `${pinyinInfo.accentedPinyin} / ${pinyinInfo.bopomofo}`
+				: (entry.pinyin ?? "");
 			wrapper.createEl("div", {
-				text: this.plugin.processPinyin?.(entry.pinyin ?? ""),
+				text: pinyinDisplay,
 				cls: 'vocab-pinyin'
 			});
 	
